@@ -22,7 +22,7 @@ Scriptable app: https://apps.apple.com/app/id1405459188
 
 ### 2. Download our script
 
-Locate repository release of .scriptable file, for example, v1.0: [TaoWidget.scriptable](https://github.com/ye-du-dev/TaoStats_Scriptable/releases/download/v1.0/TaoWidget.scriptable)
+Locate repository release of .scriptable file, for example, v1.1: [TaoWidget.scriptable](https://github.com/ye-du-dev/TaoStats_Scriptable/releases/download/v1.1/TaoWidget.scriptable)
 
 ### 3. Add script to app
 
