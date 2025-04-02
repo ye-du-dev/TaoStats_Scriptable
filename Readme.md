@@ -42,6 +42,6 @@ Go to downloaded .scriptable
 <img src="instructions/photo_5056.jpeg" alt="Tap Add Widget" width="200"/>
 <br>Long press on widget. Tap Edit Widget.<br>
 <img src="instructions/photo_5059.jpeg" alt="Long press on widget. Tap Edit Widget" width="200"/>
-<br>Select our script. Type parameters where: very first param is your subnet id, next are your uids. Example: <code>16 | 1, 2, 3, 4, 5</code><br>
+<br>Select our script. Type parameters where: very first param is your subnet id, next are your uids. <br> Script parameters example: <code>16 | 1, 2, 3, 4, 5</code> where 16 - subnet id; 1-5 - uids<br>
 <img src="instructions/photo_5102.jpeg" alt="Select script. Type parameters" width="200"/>
 <br>You can search for your subnet id here: https://taostats.io/subnets<br>
