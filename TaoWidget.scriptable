@@ -1,9 +1,8 @@
-// Version 1.4 - Dynamic Config
-
 // ============================
 // Configuration
 // ============================
 
+const SCRIPT_VERSION = '1.5'; // Version of the script
 const CONFIG_URL = 'https://raw.githubusercontent.com/TAO-Radar/Scriptable-Widget/refs/heads/main/config.json';
 
 const RAO = 10 ** -9;
@@ -32,8 +31,16 @@ const ENV = {
 
 // Fetch API config dynamically
 let API_CONFIG;
+let remoteVersion = null;
+let versionMismatch = false;
 try {
-  API_CONFIG = await fetchApiConfig();
+  const configResult = await fetchApiConfig();
+  API_CONFIG = {
+    baseUrl: configResult.baseUrl,
+    getTaoPriceUrl: configResult.getTaoPriceUrl
+  };
+  remoteVersion = configResult.version;
+  versionMismatch = remoteVersion && remoteVersion !== SCRIPT_VERSION;
 } catch (error) {
   console.error('Failed to fetch API config:', error);
   // Fallback to default config if remote fetch fails
@@ -45,7 +52,7 @@ try {
 
 if (config.runsInApp) {
   // Show welcome message in app
-  const widget = createWelcomeWidget();
+  const widget = createWelcomeWidget(versionMismatch, remoteVersion);
   config.widgetFamily = 'large';
   await widget.presentLarge();
   Script.complete();
@@ -65,7 +72,7 @@ if (config.runsInApp) {
       const neurons = await fetchNeuronsByAddresses(settings, prices);
       neurons.sort((a, b) => parseInt(a.uid) - parseInt(b.uid));
       const totals = calculateTotals(neurons);
-      const widget = createWidget(neurons, prices, totals);
+      const widget = createWidget(neurons, prices, totals, settings.currencies, versionMismatch);
       Script.setWidget(widget);
       Script.complete();
     } catch (error) {
@@ -92,7 +99,8 @@ async function fetchApiConfig() {
     
     return {
       baseUrl: response.baseUrl,
-      getTaoPriceUrl: response.getTaoPriceUrl
+      getTaoPriceUrl: response.getTaoPriceUrl,
+      version: response.version || null
     };
   } catch (error) {
     console.error('Error fetching API config:', error);
@@ -126,7 +134,8 @@ async function fetchSettings(settingId) {
     
     return {
       addresses: response.addresses,
-      netuid: response.netuid
+      netuid: response.netuid,
+      currencies: response.currencies || ['USD'] // Default to USD if not provided
     };
   } catch (error) {
     console.error('Error fetching settings:', error);
@@ -245,11 +254,19 @@ async function fetchPrice(url) {
 }
 
 async function fetchPrices() {
-  const prices = { alphaToTao: -1, taoToUsdt: -1 };
+  const prices = { 
+    alphaToTao: -1, 
+    taoToUsdt: -1,
+    alphaSymbol: 'α', // Default fallback
+    taoSymbol: 'τ'
+  };
 
-  const alphaResp = await fetchPrice(`${API_CONFIG.baseUrl}/dtao/pool/v1`);
-  if (alphaResp && Array.isArray(alphaResp.data)) {
+  const alphaResp = await fetchPrice(`${API_CONFIG.baseUrl}/dtao/pool/latest/v1`);
+  if (alphaResp && Array.isArray(alphaResp.data) && alphaResp.data.length > 0) {
     prices.alphaToTao = alphaResp.data[0].price;
+    if (alphaResp.data[0].symbol) {
+      prices.alphaSymbol = alphaResp.data[0].symbol;
+    }
   }
 
   const taoResp = await fetchPrice(API_CONFIG.getTaoPriceUrl);
@@ -264,7 +281,89 @@ async function fetchPrices() {
 // Widget Creation
 // ============================
 
-function createWelcomeWidget() {
+function getCurrencyConfig() {
+  return {
+    ALPHA: { symbol: (prices) => prices.alphaSymbol, color: ENV.colors.cyan_green_sim },
+    TAO: { symbol: (prices) => prices.taoSymbol, color: ENV.colors.orange_pearl },
+    USD: { symbol: () => '$', color: ENV.colors.gold }
+  };
+}
+
+function hasCurrency(currencies, currency) {
+  return currencies.includes(currency);
+}
+
+function formatValue(value, symbol, decimals = 2) {
+  return `${symbol}${value.toFixed(decimals)}`;
+}
+
+function formatValues(values, prices, currencies, config) {
+  const parts = [];
+  const currencyOrder = ['ALPHA', 'TAO', 'USD'];
+  
+  currencyOrder.forEach(currency => {
+    if (hasCurrency(currencies, currency) && values[currency] !== undefined) {
+      const cfg = getCurrencyConfig()[currency];
+      const symbol = cfg.symbol(prices);
+      const decimals = config.decimals[currency] || 2;
+      parts.push(formatValue(values[currency], symbol, decimals));
+    }
+  });
+  return parts.join(config.separator || ' | ');
+}
+
+function formatTotals(type, totals, prices, currencies, compact = false) {
+  const config = {
+    decimals: compact 
+      ? { ALPHA: 0, TAO: 2, USD: 2 }
+      : { ALPHA: 2, TAO: 2, USD: 2 },
+    separator: compact && type === 'daily' ? ' |' : ' | '
+  };
+
+  const values = {
+    ALPHA: type === 'stake' ? totals.stakeTotalAlphaToken : totals.dailyTotalAlphaToken,
+    TAO: type === 'stake' ? totals.stakeTotalTao : totals.dailyTotalTao,
+    USD: type === 'stake' ? totals.stakeTotalUSD : totals.dailyTotalUSD
+  };
+
+  return formatValues(values, prices, currencies, config);
+}
+
+function formatNeuronValues(type, neuron, prices, currencies) {
+  const decimals = {
+    stake: { ALPHA: 1, TAO: 2, USD: 0 },
+    daily: { ALPHA: 2, USD: 2 }
+  };
+
+  const values = {
+    stake: {
+      ALPHA: neuron.stakeAlphaToken,
+      TAO: neuron.stakeTao,
+      USD: neuron.stakeUSD
+    },
+    daily: {
+      ALPHA: neuron.dailyAlphaToken,
+      USD: neuron.dailyUSD
+    }
+  };
+
+  const valueConfig = values[type];
+  const parts = [];
+  const currencyOrder = ['ALPHA', 'TAO', 'USD'];
+  
+  currencyOrder.forEach(currency => {
+    if (hasCurrency(currencies, currency) && valueConfig[currency] !== undefined) {
+      const cfg = getCurrencyConfig()[currency];
+      const symbol = cfg.symbol(prices);
+      const decimal = decimals[type][currency] || 2;
+      parts.push(formatValue(valueConfig[currency], symbol, decimal));
+    }
+  });
+
+  return parts.join(' | ');
+}
+
+function createWelcomeWidget(showVersionWarning = false, remoteVersion = null) {
   const widget = new ListWidget();
   widget.backgroundColor = ENV.colors.bg;
 
@@ -273,12 +372,25 @@ function createWelcomeWidget() {
   stack.centerAlignContent();
 
   addText(stack, '👋 Welcome to TAO Radar', 24, ENV.colors.gold, true);
+  
+  if (showVersionWarning) {
+    stack.addSpacer(10);
+    addText(stack, '⚠️ Update Available', 18, ENV.colors.err, true);
+    addText(stack, `Remote version: ${remoteVersion}`, 14, ENV.colors.gray);
+    addText(stack, `Your version: ${SCRIPT_VERSION}`, 14, ENV.colors.gray);
+    addText(stack, 'Please update the script', 12, ENV.colors.cyan_green);
+    stack.addSpacer(10);
+  }
+  
   stack.addSpacer(10);
   addText(stack, 'Please configure the widget', 16, ENV.colors.gray);
   stack.addSpacer(5);
   addText(stack, 'with a settings ID', 14, ENV.colors.gray);
   stack.addSpacer(15);
   addText(stack, 'Example: setting_1', 12, ENV.colors.cyan_green);
+  stack.addSpacer(20);
+  addText(stack, 'Made with ❤️', 12, ENV.colors.gray);
+  addText(stack, 'by Hand of Midas Validator', 12, ENV.colors.cyan_green);
 
   return widget;
 }
@@ -302,7 +414,7 @@ function createErrorWidget(message) {
   return widget;
 }
 
-function createWidget(neurons, prices, totals) {
+function createWidget(neurons, prices, totals, currencies, showVersionWarning = false) {
   const widget = new ListWidget();
   widget.backgroundColor = ENV.colors.bg;
 
@@ -311,55 +423,65 @@ function createWidget(neurons, prices, totals) {
   frame.layoutVertically();
 
   if (config.widgetFamily === 'small') {
-    drawTotalStack(frame, totals);
-    drawPrices(frame, prices);
-    drawFooterForSmall(frame, neurons);
+    drawTotalStack(frame, totals, prices, currencies);
+    drawPrices(frame, prices, false, currencies);
+    drawFooterForSmall(frame, neurons, showVersionWarning);
   } else {
     const neuronsPanel = frame.addStack();
     const tableStacks = drawTableForLarge(neuronsPanel);
-    drawNeuronsStatForLarge(neurons, tableStacks);
-    drawTotalStackToTable(tableStacks, totals);
+    drawNeuronsStatForLarge(neurons, tableStacks, prices, currencies);
+    drawTotalStackToTable(tableStacks, totals, prices, currencies);
 
     const bottomPanel = frame.addStack();
     bottomPanel.layoutVertically();
     bottomPanel.addSpacer(5);
-    drawPrices(bottomPanel, prices, true);
-    drawTimeUpdated(bottomPanel);
+    drawPrices(bottomPanel, prices, true, currencies);
+    drawTimeUpdated(bottomPanel, showVersionWarning);
   }
 
   widget.refreshAfterDate = new Date(Date.now() + ENV.refreshInterval);
   return widget;
 }
 
-function drawTotalStack(frame, totals) {
+function drawTotalStack(frame, totals, prices, currencies) {
   const rowStack = frame.addStack();
   rowStack.layoutHorizontally();
 
-  const colTotalStake = rowStack.addStack();
-  colTotalStake.layoutVertically();
-  addText(colTotalStake, '∑ Stake', 18, ENV.colors.gray, true);
-  addText(colTotalStake, `α${totals.stakeTotalAlphaToken.toFixed(2)}`, 14, ENV.colors.cyan_green_sim);
-  addText(colTotalStake, `τ${totals.stakeTotalTao.toFixed(2)}`, 14, ENV.colors.orange_pearl);
-  addText(colTotalStake, `$${totals.stakeTotalUSD.toFixed(2)}`, 14, ENV.colors.gold);
+  const drawColumn = (title, type, size, titleSize) => {
+    const col = rowStack.addStack();
+    col.layoutVertically();
+    addText(col, title, titleSize, ENV.colors.gray, true);
+    
+    const currencyOrder = ['ALPHA', 'TAO', 'USD'];
+    currencyOrder.forEach(currency => {
+      if (hasCurrency(currencies, currency)) {
+        const cfg = getCurrencyConfig()[currency];
+        const values = {
+          stake: { ALPHA: totals.stakeTotalAlphaToken, TAO: totals.stakeTotalTao, USD: totals.stakeTotalUSD },
+          daily: { ALPHA: totals.dailyTotalAlphaToken, TAO: totals.dailyTotalTao, USD: totals.dailyTotalUSD }
+        };
+        const value = values[type][currency];
+        const symbol = cfg.symbol(prices);
+        addText(col, formatValue(value, symbol), size, cfg.color);
+      }
+    });
 
+    return col;
+  };
+
+  drawColumn('∑ Stake', 'stake', 14, 18);
   rowStack.addSpacer();
-
-  const colTotalDaily = rowStack.addStack();
-  colTotalDaily.layoutVertically();
-  addText(colTotalDaily, '∑ Daily', 13, ENV.colors.gray, true);
-  addText(colTotalDaily, `α${totals.dailyTotalAlphaToken.toFixed(2)}`, 11, ENV.colors.cyan_green_sim);
-  addText(colTotalDaily, `τ${totals.dailyTotalTao.toFixed(2)}`, 11, ENV.colors.orange_pearl);
-  addText(colTotalDaily, `$${totals.dailyTotalUSD.toFixed(2)}`, 11, ENV.colors.gold);
+  drawColumn('∑ Daily', 'daily', 11, 13);
 }
 
-function drawTotalStackToTable(stacks, totals) {
+function drawTotalStackToTable(stacks, totals, prices, currencies) {
   const [col0, col1, col2] = stacks;
   addText(col0, '∑', 18, ENV.colors.cyan_green_sim, true);
-  addText(col1, `α${totals.stakeTotalAlphaToken.toFixed(0)} | t${totals.stakeTotalTao.toFixed(2)} | $${totals.stakeTotalUSD.toFixed(2)}`, 14, ENV.colors.orange_pearl, true);
-  addText(col2, `α${totals.dailyTotalAlphaToken.toFixed(0)} |t${totals.dailyTotalTao.toFixed(2)} | $${totals.dailyTotalUSD.toFixed(2)}`, 14, ENV.colors.gold, true);
+  addText(col1, formatTotals('stake', totals, prices, currencies, true), 14, ENV.colors.orange_pearl, true);
+  addText(col2, formatTotals('daily', totals, prices, currencies, true), 14, ENV.colors.gold, true);
 }
 
-function drawFooterForSmall(frame, neurons) {
+function drawFooterForSmall(frame, neurons, showVersionWarning = false) {
   const bottomStack = frame.addStack();
   bottomStack.layoutVertically();
 
@@ -374,12 +496,17 @@ function drawFooterForSmall(frame, neurons) {
   });
 
   uidStack.addSpacer();
-  drawTimeUpdated(bottomStack);
+  drawTimeUpdated(bottomStack, showVersionWarning);
 }
 
-function drawTimeUpdated(stack) {
+function drawTimeUpdated(stack, showVersionWarning = false) {
   const timeStack = stack.addStack();
   timeStack.addSpacer();
+  
+  if (showVersionWarning) {
+    addText(timeStack, '🔄 ', 11, ENV.colors.err);
+  }
+  
   addText(timeStack, 'Sync: ', 11, ENV.colors.gray);
 
   const date = timeStack.addDate(new Date());
@@ -389,26 +516,30 @@ function drawTimeUpdated(stack) {
   timeStack.addSpacer();
 }
 
-function drawPrices(frame, prices, isLarge = false) {
+function drawPrices(frame, prices, isLarge = false, currencies = ['USD']) {
   const rowStack = frame.addStack();
   rowStack.layoutHorizontally();
   const spacer = isLarge ? null : 5;
 
-  const col1 = rowStack.addStack();
-  col1.layoutVertically();
-  addText(col1, '1τ = ', 11, ENV.colors.orange_pearl, true);
+  if (hasCurrency(currencies, 'TAO')) {
+    const col1 = rowStack.addStack();
+    col1.layoutVertically();
+    addText(col1, `1${prices.taoSymbol} = `, 11, ENV.colors.orange_pearl, true);
+    rowStack.addSpacer(spacer);
+  }
 
-  rowStack.addSpacer(spacer);
+  if (hasCurrency(currencies, 'ALPHA')) {
+    const col2 = rowStack.addStack();
+    col2.layoutVertically();
+    addText(col2, `${prices.alphaSymbol}${(1 / prices.alphaToTao).toFixed(2)}`, 11, ENV.colors.cyan_green_sim, true);
+    rowStack.addSpacer(spacer);
+  }
 
-  const col2 = rowStack.addStack();
-  col2.layoutVertically();
-  addText(col2, `α${(1 / prices.alphaToTao).toFixed(2)}`, 11, ENV.colors.cyan_green_sim, true);
-
-  rowStack.addSpacer(spacer);
-
-  const col3 = rowStack.addStack();
-  col3.layoutVertically();
-  addText(col3, `$${parseFloat(prices.taoToUsdt).toFixed(2)}`, 11, ENV.colors.gold, true);
+  if (hasCurrency(currencies, 'USD')) {
+    const col3 = rowStack.addStack();
+    col3.layoutVertically();
+    addText(col3, `$${parseFloat(prices.taoToUsdt).toFixed(2)}`, 11, ENV.colors.gold, true);
+  }
 }
 
 function drawTableForLarge(frame) {
@@ -429,7 +560,7 @@ function drawTableForLarge(frame) {
   return [uidStack, stakeStack, dailyStack];
 }
 
-function drawNeuronsStatForLarge(neurons, stacks) {
+function drawNeuronsStatForLarge(neurons, stacks, prices, currencies) {
   const [uidStack, stakeStack, dailyStack] = stacks;
 
   neurons.forEach((neuron, i) => {
@@ -437,8 +568,8 @@ function drawNeuronsStatForLarge(neurons, stacks) {
 
     if (!neuron.error) {
       addText(uidStack, `${neuron.uid}`, 12, color, true);
-      addText(stakeStack, `α${neuron.stakeAlphaToken.toFixed(1)} | t${neuron.stakeTao.toFixed(2)} | $${neuron.stakeUSD.toFixed(0)}`, 12, color, true);
-      addText(dailyStack, `α${neuron.dailyAlphaToken.toFixed(2)} | $${neuron.dailyUSD.toFixed(2)}`, 12, color, true);
+      addText(stakeStack, formatNeuronValues('stake', neuron, prices, currencies), 12, color, true);
+      addText(dailyStack, formatNeuronValues('daily', neuron, prices, currencies), 12, color, true);
     } else {
       addText(uidStack, `UID ${neuron.uid}: ${neuron.error}`, 12, ENV.colors.err, true);
       addText(stakeStack, '-', 12, ENV.colors.err, true);
