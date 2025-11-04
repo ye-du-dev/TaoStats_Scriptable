@@ -382,7 +382,9 @@ function drawNeuronsStatForLarge(neurons, stacks) {
       addSemiboldText(stakeStack, `α${ neuron.stakeAlphaToken.toFixed(1) } | t${ neuron.stakeTao.toFixed(2) } | $${ neuron.stakeUSD.toFixed(0) }`, 12, currentColor);
       addSemiboldText(dailyStack, `α${ neuron.dailyAlphaToken.toFixed(2) } | $${ neuron.dailyUSD.toFixed(2) }`, 12, currentColor);
     } else {
-      addSemiboldText(frame, `UID ${ neuron.uid }: ${ neuron.error }`, 12, ENV.colors.err);
+      addSemiboldText(uidStack, `UID ${ neuron.uid }: ${ neuron.error }`, 12, ENV.colors.err);
+      addSemiboldText(stakeStack, `-`, 12, ENV.colors.err);
+      addSemiboldText(dailyStack, `-`, 12, ENV.colors.err);
     }
   });
 }
