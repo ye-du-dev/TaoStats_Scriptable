@@ -33,52 +33,74 @@ const ENV = {
 // Main Execution
 // ============================
 
-const widgetParameters = config.runsInApp
-  ? '138, 39, 1, 2, 3, 4, 5, 6, 7'
-  : args.widgetParameter;
-
 if (config.runsInApp) {
+  // Show welcome message in app
+  const widget = createWelcomeWidget();
   config.widgetFamily = 'large';
-}
-
-try {
-  const widgetInput = widgetParameters.split(',').map(uid => uid.trim());
-  const prices = await fetchPrices();
-  const neurons = await fetchNeuronsByUids(widgetInput, prices);
-  neurons.sort((a, b) => parseInt(a.uid) - parseInt(b.uid));
-  const totals = calculateTotals(neurons);
-  const widget = createWidget(neurons, prices, totals);
-
-  if (!config.runsInWidget) {
-    const presentMethods = {
-      small: () => widget.presentSmall(),
-      medium: () => widget.presentMedium(),
-      large: () => widget.presentLarge()
-    };
-    await presentMethods[config.widgetFamily]();
-  } else {
+  await widget.presentLarge();
+  Script.complete();
+} else {
+  // Running as widget
+  const settingsId = args.widgetParameter;
+  
+  if (!settingsId) {
+    // No settings provided - show error
+    const widget = createErrorWidget('No settings ID provided. Please configure the widget with a settings ID.');
     Script.setWidget(widget);
     Script.complete();
+  } else {
+    try {
+      const settings = await fetchSettings(settingsId);
+      const prices = await fetchPrices();
+      const neurons = await fetchNeuronsByAddresses(settings, prices);
+      neurons.sort((a, b) => parseInt(a.uid) - parseInt(b.uid));
+      const totals = calculateTotals(neurons);
+      const widget = createWidget(neurons, prices, totals);
+      Script.setWidget(widget);
+      Script.complete();
+    } catch (error) {
+      console.error(error);
+      const errorWidget = createErrorWidget(`Error: ${error.message || 'Failed to load widget data'}`);
+      Script.setWidget(errorWidget);
+      Script.complete();
+    }
   }
-} catch (error) {
-  console.error(error);
 }
 
 // ============================
 // Data Fetching
 // ============================
 
-async function fetchNeuronsByUids(uids, prices) {
+async function fetchSettings(settingId) {
   try {
-    const allNeurons = await fetchAllNeurons();
+    const url = `${API_CONFIG.baseUrl}/settings/${settingId}`;
+    const response = await new Request(url).loadJSON();
+    
+    if (!response || !response.addresses || !Array.isArray(response.addresses) || !response.netuid) {
+      throw new Error('Invalid settings response');
+    }
+    
+    return {
+      addresses: response.addresses,
+      netuid: response.netuid
+    };
+  } catch (error) {
+    console.error('Error fetching settings:', error);
+    throw error;
+  }
+}
+
+async function fetchNeuronsByAddresses(settings, prices) {
+  try {
+    const allNeurons = await fetchAllNeurons(settings);
+    
+    if (allNeurons.length === 0) {
+      return [{ uid: 0, error: 'No neurons found for the provided addresses.' }];
+    }
+
     const { alphaToTao, taoToUsdt } = prices;
 
-    return uids.map(uid => {
-      const neuron = allNeurons.find(n => n.uid === parseInt(uid));
-      if (!neuron) {
-        return { uid, error: 'Neuron not found' };
-      }
-
+    return allNeurons.map(neuron => {
       const dailyAlphaToken = parseFloat(neuron.daily_reward) * RAO;
       const stakeAlphaToken = parseFloat(neuron.alpha_stake) * RAO;
       const dailyTao = dailyAlphaToken * alphaToTao;
@@ -86,11 +108,19 @@ async function fetchNeuronsByUids(uids, prices) {
       const dailyUSD = dailyTao * taoToUsdt;
       const stakeUSD = stakeTao * taoToUsdt;
 
-      return { uid, dailyAlphaToken, stakeAlphaToken, dailyTao, stakeTao, dailyUSD, stakeUSD };
+      return {
+        uid: neuron.uid,
+        dailyAlphaToken,
+        stakeAlphaToken,
+        dailyTao,
+        stakeTao,
+        dailyUSD,
+        stakeUSD
+      };
     });
   } catch (error) {
     console.error('Failed to fetch neurons:', error);
-    return uids.map(uid => ({ uid, error: 'Failed to process neuron data.' }));
+    return [{ uid: 0, error: 'Failed to process neuron data.' }];
   }
 }
 
@@ -117,16 +147,32 @@ function calculateTotals(neurons) {
   }, initialTotals);
 }
 
-async function fetchAllNeurons() {
+async function fetchAllNeurons(settings) {
   try {
-    const url = `${API_CONFIG.baseUrl}/metagraph/latest/v1?netuid=16`;
-    const response = await new Request(url).loadJSON();
+    const allNeurons = [];
+    const seenUids = new Set();
 
-    if (!response || !Array.isArray(response.data)) {
-      throw new Error('Invalid API response');
+    // Fetch neurons for each address and combine results
+    for (const address of settings.addresses) {
+      try {
+        const url = `${API_CONFIG.baseUrl}/metagraph/latest/v1?netuid=${settings.netuid}&search=${encodeURIComponent(address)}&page=1`;
+        const response = await new Request(url).loadJSON();
+
+        if (response && Array.isArray(response.data)) {
+          // Add neurons that haven't been seen yet (deduplicate by UID)
+          response.data.forEach(neuron => {
+            if (!seenUids.has(neuron.uid)) {
+              seenUids.add(neuron.uid);
+              allNeurons.push(neuron);
+            }
+          });
+        }
+      } catch (error) {
+        console.error(`Error fetching neurons for address ${address}:`, error);
+      }
     }
 
-    return response.data;
+    return allNeurons;
   } catch (error) {
     console.error('Error fetching neuron data:', error);
     return [];
@@ -162,6 +208,44 @@ async function fetchPrices() {
 // ============================
 // Widget Creation
 // ============================
+
+function createWelcomeWidget() {
+  const widget = new ListWidget();
+  widget.backgroundColor = ENV.colors.bg;
+
+  const stack = widget.addStack();
+  stack.layoutVertically();
+  stack.centerAlignContent();
+
+  addText(stack, '👋 Welcome to TAO Radar', 24, ENV.colors.gold, true);
+  stack.addSpacer(10);
+  addText(stack, 'Please configure the widget', 16, ENV.colors.gray);
+  stack.addSpacer(5);
+  addText(stack, 'with a settings ID', 14, ENV.colors.gray);
+  stack.addSpacer(15);
+  addText(stack, 'Example: setting_1', 12, ENV.colors.cyan_green);
+
+  return widget;
+}
+
+function createErrorWidget(message) {
+  const widget = new ListWidget();
+  widget.backgroundColor = ENV.colors.bg;
+
+  const stack = widget.addStack();
+  stack.layoutVertically();
+  stack.centerAlignContent();
+
+  addText(stack, '⚠️ Error', 20, ENV.colors.err, true);
+  stack.addSpacer(10);
+  
+  const lines = message.split('\n');
+  lines.forEach(line => {
+    addText(stack, line, 12, ENV.colors.gray);
+  });
+
+  return widget;
+}
 
 function createWidget(neurons, prices, totals) {
   const widget = new ListWidget();
